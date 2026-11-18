@@ -9,7 +9,7 @@ The library product and the Swift module are both named `Last1ID`. It links only
 | Platforms | iOS 16+, macOS 13+ |
 | Issuer | `https://auth.last1.id` |
 | License | Apache-2.0 (`LICENSE` in this folder) |
-| Version | 0.4.0, aligned with `@last1id/sdk` 0.4 |
+| Version | 0.5.0, aligned with `@last1id/sdk` 0.5 |
 
 ## Install
 
@@ -19,7 +19,7 @@ Add the Swift package from [Last-1-Enterprises/last1id-swift](https://github.com
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Last-1-Enterprises/last1id-swift", from: "0.4.0"),
+    .package(url: "https://github.com/Last-1-Enterprises/last1id-swift", from: "0.5.0"),
 ],
 targets: [
     .target(
@@ -43,10 +43,13 @@ Request only the scopes you need. `openid` is required. Add `offline_access` to 
 
 ## Universal link callback
 
-Use this on iOS 17.4+ and macOS 14.4+. The redirect URI is an `https` URL on a domain you control.
+Prefer an `https` redirect on a domain the app controls. Register that exact URI in the Last1 ID developer console. Add the Associated Domains entitlement and serve an Apple App Site Association file for that domain. Keep a custom scheme as the fallback for systems that cannot use an HTTPS callback.
 
-1. Add the Associated Domains entitlement `applinks:app.example.com`.
-2. Serve Apple App Site Association at `https://app.example.com/.well-known/apple-app-site-association` and include the callback path:
+Use the HTTPS callback on iOS 17.4+ and macOS 14.4+.
+
+1. Register `https://app.example.com/auth/callback` as a redirect URI.
+2. Add the Associated Domains entitlement `applinks:app.example.com`.
+3. Serve Apple App Site Association at `https://app.example.com/.well-known/apple-app-site-association` and include the callback path:
 
 ```json
 {
@@ -73,11 +76,11 @@ callback: .https(host: "app.example.com", path: "/auth/callback")
 
 ## Custom scheme callback
 
-Register `myapp://callback` as a redirect URI. Add a URL type for `myapp` in Info.plist. Then:
+Use a custom scheme when the device cannot claim an HTTPS universal link. The server accepts a dotted reverse-DNS scheme. Register `com.example.app:/callback` as a redirect URI in the developer console. Add a URL type for `com.example.app` in Info.plist. Then:
 
 ```swift
-callback: .customScheme("myapp")
-redirectURI: URL(string: "myapp://callback")!
+callback: .customScheme("com.example.app")
+redirectURI: URL(string: "com.example.app:/callback")!
 ```
 
 ## Quickstart
@@ -116,11 +119,31 @@ let profile = try await client.userInfo()
 try await client.signOut()
 ```
 
-`userInfo()` refreshes once when Last1 ID returns `invalid_token`. `signOut()` revokes the refresh token and then deletes the Keychain item even if the network call fails. `revoke()` is the server call alone, so a failure can be retried.
+`userInfo()` refreshes once when Last1 ID returns `invalid_token`. `signOut()` revokes the refresh token, deletes the Keychain item even if the network call fails, and returns the end-session URL. Open that URL to end the Last1 browser session. `endSessionURL()` builds the same URL without clearing the store. `revoke()` is the server call alone, so a failure can be retried. `email_verified` is kept only when it is a JSON boolean. A string value is dropped and the rest of the token is accepted. The issuer sends a boolean. `session.idToken` is the raw token.
 
 ## Backend exchange
 
-Some apps must keep the client secret on a server. The phone runs PKCE and the browser session, then your backend exchanges the code as a confidential client.
+The phone runs PKCE and the browser session, then your backend exchanges the code. Two backends are supported.
+
+A **public** backend is the same native public client. It calls `exchangeAuthorizationCode` with the code and the verifier. It does not send a client secret.
+
+```swift
+let handoff = try await signIn.signInForBackendExchange {
+    view.window!
+}
+let session = try await backendClient.exchangeAuthorizationCode(
+    code: handoff.code,
+    codeVerifier: handoff.codeVerifier,
+    nonce: handoff.nonce
+)
+// session.idToken is the raw ID token. session.claims is already verified.
+```
+
+`backendClient` uses the same `clientID` and `redirectURI`. The token request is `grant_type`, `code`, `redirect_uri`, `client_id`, and `code_verifier`. There is no `client_secret` field.
+
+A **confidential** backend keeps the client secret on the server. The device still never sees that secret. The backend posts the same fields plus `client_secret`.
+
+To supply your own `state`, `nonce`, or PKCE, pass them to `signIn` or `signInForBackendExchange`. A caller-supplied `state` should be high-entropy: at least 128 bits from a cryptographic random source. A short or guessable value is not safe. The SDK's generated state already is. A verifier is 43 to 128 unreserved characters (RFC 7636). A pair's challenge must be the S256 digest of that verifier. Those values are sent unchanged. The callback `state` and the ID token `nonce` are checked against them. `Last1IDCallbackParser.parse` reads `code`, `state`, and `error` when the app handles the redirect URL itself. `authorizationCode` still requires the state from the attempt.
 
 ```swift
 let handoff = try await signIn.signInForBackendExchange {

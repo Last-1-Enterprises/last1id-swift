@@ -26,6 +26,39 @@ public struct Last1IDPKCE: Sendable, Equatable {
         return Base64URL.encode(Data(digest))
     }
 
+    /// Caller verifier, or a pair. A pair's challenge must be the S256
+    /// digest of its verifier. A challenge with no verifier is rejected.
+    static func resolve(codeVerifier: String?, pair: Last1IDPKCE?) throws -> Last1IDPKCE {
+        if pair == nil && codeVerifier == nil {
+            return generate()
+        }
+        if let pair, let codeVerifier, pair.codeVerifier != codeVerifier {
+            throw Last1IDError.configuration("PKCE code verifier does not match the supplied pair")
+        }
+        if let codeVerifier, pair == nil {
+            return try Last1IDPKCE(codeVerifier: codeVerifier)
+        }
+        guard let pair else {
+            return generate()
+        }
+        try validate(pair.codeVerifier)
+        guard pair.codeChallenge == challenge(for: pair.codeVerifier) else {
+            throw Last1IDError.configuration("PKCE code challenge does not match the verifier")
+        }
+        return pair
+    }
+
+    /// Uses a caller value unchanged. Empty and values over 1024 bytes
+    /// are rejected because the callback state check cannot accept them.
+    static func suppliedOpaque(_ value: String?, name: String) throws -> String {
+        guard let value else { return Last1Random.token() }
+        let count = value.utf8.count
+        guard (1...1024).contains(count) else {
+            throw Last1IDError.configuration("\(name) must be 1 to 1024 bytes")
+        }
+        return value
+    }
+
     static func validate(_ verifier: String) throws {
         let count = verifier.utf8.count
         guard (43...128).contains(count) else {

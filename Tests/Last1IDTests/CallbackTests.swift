@@ -71,6 +71,43 @@ final class CallbackTests: XCTestCase {
         }
     }
 
+    func testRepeatedCodeStateOrErrorIsInvalid() {
+        let redirect = URL(string: "com.example.app:/callback")!
+        let urls = [
+            "com.example.app:/callback?code=a&code=b&state=s",
+            "com.example.app:/callback?code=a&state=s&state=t",
+            "com.example.app:/callback?error=access_denied&error=server_error&state=s",
+        ]
+        for raw in urls {
+            XCTAssertThrowsError(
+                try Last1IDCallbackParser.parse(callback: URL(string: raw)!, redirectURI: redirect)
+            ) { error in
+                XCTAssertEqual(error as? Last1IDError, .invalidCallback)
+            }
+        }
+    }
+
+    func testParseReturnsCodeStateAndErrorWithoutCheckingState() throws {
+        let redirect = URL(string: "myapp://callback")!
+        let ok = try Last1IDCallbackParser.parse(
+            callback: URL(string: "myapp://callback?code=abc&state=from-app")!,
+            redirectURI: redirect
+        )
+        XCTAssertEqual(ok.code, "abc")
+        XCTAssertEqual(ok.state, "from-app")
+        XCTAssertNil(ok.error)
+        XCTAssertNil(ok.errorDescription)
+
+        let failed = try Last1IDCallbackParser.parse(
+            callback: URL(string: "myapp://callback?error=access_denied&error_description=no&state=other")!,
+            redirectURI: redirect
+        )
+        XCTAssertNil(failed.code)
+        XCTAssertEqual(failed.state, "other")
+        XCTAssertEqual(failed.error, "access_denied")
+        XCTAssertEqual(failed.errorDescription, "no")
+    }
+
     func testBackendExchangeDescriptionRedactsSecrets() {
         let handoff = Last1IDBackendExchange(
             code: "secret-code",

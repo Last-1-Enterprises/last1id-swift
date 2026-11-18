@@ -28,13 +28,31 @@ public final class Last1IDSignIn: NSObject, ASWebAuthenticationPresentationConte
         super.init()
     }
 
+    /// Presents the browser and exchanges the code on this device.
+    ///
+    /// `state`, `nonce`, and PKCE are optional. When you pass them, those
+    /// exact values are sent and then checked: the callback `state` must
+    /// match, and the ID token `nonce` must match. A PKCE value is either
+    /// a verifier or a pair. The verifier is 43 to 128 unreserved
+    /// characters, and the challenge is the S256 digest of that verifier.
     public func signIn(
         prefersEphemeralSession: Bool? = nil,
         prompt: String? = nil,
         idTokenHint: String? = nil,
+        state: String? = nil,
+        nonce: String? = nil,
+        codeVerifier: String? = nil,
+        pkce: Last1IDPKCE? = nil,
         presentationAnchor: (() -> ASPresentationAnchor)? = nil
     ) async throws -> Last1IDSession {
-        let attempt = try await client.beginAuthorization(prompt: prompt, idTokenHint: idTokenHint)
+        let attempt = try await client.beginAuthorization(
+            prompt: prompt,
+            idTokenHint: idTokenHint,
+            state: state,
+            nonce: nonce,
+            codeVerifier: codeVerifier,
+            pkce: pkce
+        )
         let configuration = client.configuration
         let callback = try await authenticate(
             url: attempt.url,
@@ -55,14 +73,30 @@ public final class Last1IDSignIn: NSObject, ASWebAuthenticationPresentationConte
     }
 
     /// Browser sign-in that does not exchange the code on the device.
-    /// Hand the result to your backend. The backend is the confidential client.
+    ///
+    /// Hand the result to your backend. A confidential backend sends its
+    /// client secret with the code and this verifier. A public backend
+    /// calls `exchangeAuthorizationCode` with the code and verifier and
+    /// sends no client secret. `state` and `nonce` follow the same rules
+    /// as `signIn`: supplied values are used exactly and then checked.
     public func signInForBackendExchange(
         prefersEphemeralSession: Bool? = nil,
         prompt: String? = nil,
         idTokenHint: String? = nil,
+        state: String? = nil,
+        nonce: String? = nil,
+        codeVerifier: String? = nil,
+        pkce: Last1IDPKCE? = nil,
         presentationAnchor: (() -> ASPresentationAnchor)? = nil
     ) async throws -> Last1IDBackendExchange {
-        let attempt = try await client.beginAuthorization(prompt: prompt, idTokenHint: idTokenHint)
+        let attempt = try await client.beginAuthorization(
+            prompt: prompt,
+            idTokenHint: idTokenHint,
+            state: state,
+            nonce: nonce,
+            codeVerifier: codeVerifier,
+            pkce: pkce
+        )
         let configuration = client.configuration
         let callback = try await authenticate(
             url: attempt.url,

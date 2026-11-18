@@ -3,7 +3,8 @@ import Foundation
 
 /// Claims from a verified Last1 ID token.
 ///
-/// `emailVerified` is `email_verified`. `last1Verified` and
+/// `emailVerified` is `email_verified` when that claim is a JSON boolean.
+/// A string value is ignored. `last1Verified` and
 /// `last1VerifiedAt` are present when the token was issued with
 /// `identity_proof:read`. `amr` and `acr` describe the sign-in factors
 /// (`aal1` password, `aal2` with a second factor).
@@ -184,9 +185,6 @@ public struct Last1IDIDTokenVerifier: Sendable {
         }
         let amr = Last1JSON.stringArray(payload["amr"]) ?? []
         if payload["amr"] != nil && Last1JSON.stringArray(payload["amr"]) == nil {
-            throw Last1IDError.idToken(.malformed)
-        }
-        if payload["email_verified"] != nil && Last1JSON.bool(payload["email_verified"]) == nil {
             throw Last1IDError.idToken(.malformed)
         }
         if payload["last1_verified"] != nil && Last1JSON.bool(payload["last1_verified"]) == nil {

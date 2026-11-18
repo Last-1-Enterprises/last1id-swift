@@ -25,6 +25,6 @@ final class PKCETests: XCTestCase {
     }
 
     func testSDKVersion() {
-        XCTAssertEqual(Last1IDVersion.current, "0.4.0")
+        XCTAssertEqual(Last1IDVersion.current, "0.5.0")
     }
 }

@@ -64,6 +64,16 @@ final class IDTokenVerificationTests: XCTestCase {
         XCTAssertEqual(fetches, 1)
     }
 
+    func testStringEmailVerifiedIsDropped() async throws {
+        serveKey()
+        var payload = idTokenPayload(issuer: issuer)
+        payload["email_verified"] = "true"
+        let token = try token(payload: payload)
+        let claims = try await makeVerifier().verify(token, expectedNonce: "nonce-1")
+        XCTAssertNil(claims.emailVerified)
+        XCTAssertEqual(claims.sub, "11111111-1111-1111-1111-111111111111")
+    }
+
     func testWrongIssuer() async throws {
         serveKey()
         let token = try token(payload: idTokenPayload(issuer: "https://evil.example"))

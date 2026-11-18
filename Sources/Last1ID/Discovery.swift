@@ -12,6 +12,37 @@ public struct Last1IDDiscovery: Sendable, Equatable {
     public let tokenEndpointAuthMethodsSupported: [String]
     public let codeChallengeMethodsSupported: [String]
     public let promptValuesSupported: [String]
+    /// Absent from older discovery documents. Nil means the client
+    /// should use `{issuer}/oauth/logout`.
+    public let endSessionEndpoint: URL?
+
+    public init(
+        issuer: String,
+        authorizationEndpoint: URL,
+        tokenEndpoint: URL,
+        userinfoEndpoint: URL,
+        revocationEndpoint: URL,
+        jwksURI: URL,
+        responseTypesSupported: [String],
+        idTokenSigningAlgValuesSupported: [String],
+        tokenEndpointAuthMethodsSupported: [String],
+        codeChallengeMethodsSupported: [String],
+        promptValuesSupported: [String],
+        endSessionEndpoint: URL? = nil
+    ) {
+        self.issuer = issuer
+        self.authorizationEndpoint = authorizationEndpoint
+        self.tokenEndpoint = tokenEndpoint
+        self.userinfoEndpoint = userinfoEndpoint
+        self.revocationEndpoint = revocationEndpoint
+        self.jwksURI = jwksURI
+        self.responseTypesSupported = responseTypesSupported
+        self.idTokenSigningAlgValuesSupported = idTokenSigningAlgValuesSupported
+        self.tokenEndpointAuthMethodsSupported = tokenEndpointAuthMethodsSupported
+        self.codeChallengeMethodsSupported = codeChallengeMethodsSupported
+        self.promptValuesSupported = promptValuesSupported
+        self.endSessionEndpoint = endSessionEndpoint
+    }
 
     static func parse(data: Data, expectedIssuer: String) throws -> Last1IDDiscovery {
         guard let json = Last1JSON.object(from: data, maximumBytes: 65_536) else {
@@ -56,6 +87,19 @@ public struct Last1IDDiscovery: Sendable, Equatable {
             throw Last1IDError.discovery("code_challenge_methods_supported does not include S256")
         }
 
+        func optionalEndpoint(_ key: String) throws -> URL? {
+            guard let raw = json[key] else { return nil }
+            if raw is NSNull { return nil }
+            guard let text = Last1JSON.string(raw) else {
+                throw Last1IDError.discovery("\(key) is not a string")
+            }
+            if text.isEmpty { return nil }
+            guard let url = URL(string: text), Last1URL.sameOrigin(url, issuerHost: host) else {
+                throw Last1IDError.discovery("\(key) is not an https URL on the issuer host")
+            }
+            return url
+        }
+
         return Last1IDDiscovery(
             issuer: issuer,
             authorizationEndpoint: try endpoint("authorization_endpoint"),
@@ -67,7 +111,8 @@ public struct Last1IDDiscovery: Sendable, Equatable {
             idTokenSigningAlgValuesSupported: algorithms,
             tokenEndpointAuthMethodsSupported: authMethods,
             codeChallengeMethodsSupported: challenges,
-            promptValuesSupported: Last1JSON.stringArray(json["prompt_values_supported"]) ?? []
+            promptValuesSupported: Last1JSON.stringArray(json["prompt_values_supported"]) ?? [],
+            endSessionEndpoint: try optionalEndpoint("end_session_endpoint")
         )
     }
 }

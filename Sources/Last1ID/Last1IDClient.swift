@@ -4,6 +4,20 @@ public struct Last1IDSession: Sendable, Equatable {
     public let claims: Last1IDIDTokenClaims
     public let scope: String?
     public let accessTokenExpiresAt: Date?
+    /// Raw ID token from the token response.
+    public let idToken: String?
+
+    public init(
+        claims: Last1IDIDTokenClaims,
+        scope: String?,
+        accessTokenExpiresAt: Date?,
+        idToken: String? = nil
+    ) {
+        self.claims = claims
+        self.scope = scope
+        self.accessTokenExpiresAt = accessTokenExpiresAt
+        self.idToken = idToken
+    }
 }
 
 /// Values a native app hands to its own backend for a confidential
@@ -92,33 +106,49 @@ public actor Last1IDClient {
         return document
     }
 
-    public func beginAuthorization(prompt: String? = nil, idTokenHint: String? = nil) async throws -> Last1IDAuthorizationAttempt {
+    /// Starts an authorization code request.
+    ///
+    /// Pass `state`, `nonce`, or a PKCE verifier or pair to use those
+    /// values exactly. A caller-supplied `state` should be high-entropy,
+    /// at least 128 bits from a cryptographic random source. A verifier
+    /// must be 43 to 128 unreserved characters (RFC 7636). A pair's
+    /// challenge must be the S256 digest of that verifier. Omitted values
+    /// are generated. The returned attempt is what sign-in checks against
+    /// the callback `state` and the ID token `nonce`.
+    public func beginAuthorization(
+        prompt: String? = nil,
+        idTokenHint: String? = nil,
+        state: String? = nil,
+        nonce: String? = nil,
+        codeVerifier: String? = nil,
+        pkce: Last1IDPKCE? = nil
+    ) async throws -> Last1IDAuthorizationAttempt {
         try configuration.validate()
         let document = try await discovery()
         if let prompt, !document.promptValuesSupported.isEmpty, !document.promptValuesSupported.contains(prompt) {
             throw Last1IDError.configuration("prompt \(prompt) is not advertised by the issuer")
         }
         let hint = try await resolvedIDTokenHint(prompt: prompt, explicit: idTokenHint)
-        let pkce = Last1IDPKCE.generate()
-        let state = Last1Random.token()
-        let nonce = Last1Random.token()
+        let resolved = try Last1IDPKCE.resolve(codeVerifier: codeVerifier, pair: pkce)
+        let resolvedState = try Last1IDPKCE.suppliedOpaque(state, name: "state")
+        let resolvedNonce = try Last1IDPKCE.suppliedOpaque(nonce, name: "nonce")
         let url = Last1IDAuthorizeURL.make(
             authorizationEndpoint: document.authorizationEndpoint,
             clientID: configuration.clientID,
             redirectURI: configuration.redirectURI,
             scopes: configuration.scopes,
-            codeChallenge: pkce.codeChallenge,
-            state: state,
-            nonce: nonce,
+            codeChallenge: resolved.codeChallenge,
+            state: resolvedState,
+            nonce: resolvedNonce,
             prompt: prompt,
             idTokenHint: hint
         )
         return Last1IDAuthorizationAttempt(
             url: url,
-            state: state,
-            nonce: nonce,
-            codeVerifier: pkce.codeVerifier,
-            codeChallenge: pkce.codeChallenge
+            state: resolvedState,
+            nonce: resolvedNonce,
+            codeVerifier: resolved.codeVerifier,
+            codeChallenge: resolved.codeChallenge
         )
     }
 
@@ -142,7 +172,12 @@ public actor Last1IDClient {
         guard let idToken = parsed.idTokenFromResponse else { throw Last1IDError.invalidResponse }
         let claims = try await idTokenVerifier(document).verify(idToken, expectedNonce: nonce)
         try await tokenStore.save(parsed.tokens)
-        return Last1IDSession(claims: claims, scope: parsed.tokens.scope, accessTokenExpiresAt: parsed.tokens.expiresAt)
+        return Last1IDSession(
+            claims: claims,
+            scope: parsed.tokens.scope,
+            accessTokenExpiresAt: parsed.tokens.expiresAt,
+            idToken: idToken
+        )
     }
 
     public func refresh() async throws -> Last1IDTokens {
@@ -186,8 +221,20 @@ public actor Last1IDClient {
 
     /// Revokes the server token, then always removes the local session.
     /// A revoke failure is thrown after the local session is gone.
-    public func signOut() async throws {
+    /// The returned URL is the RP-initiated logout endpoint. Open it so
+    /// the Last1 browser session ends too. Callers that ignore the URL
+    /// keep the previous sign-out behavior.
+    @discardableResult
+    public func signOut(
+        postLogoutRedirectURI: URL? = nil,
+        state: String? = nil
+    ) async throws -> URL {
         let tokens = try await tokenStore.load()
+        let url = await endSessionURL(
+            idTokenHint: tokens?.idToken,
+            postLogoutRedirectURI: postLogoutRedirectURI,
+            state: state
+        )
         var revokeError: Error?
         if let tokens {
             do {
@@ -198,6 +245,50 @@ public actor Last1IDClient {
         }
         try await tokenStore.clear()
         if let revokeError { throw revokeError }
+        return url
+    }
+
+    /// RP-Initiated Logout URL. Uses discovery `end_session_endpoint`
+    /// when it is on the issuer origin, otherwise `{issuer}/oauth/logout`.
+    public func endSessionURL(
+        idTokenHint: String? = nil,
+        postLogoutRedirectURI: URL? = nil,
+        state: String? = nil
+    ) async -> URL {
+        var base = fallbackEndSessionURL()
+        if let document = try? await discovery() {
+            if let endpoint = document.endSessionEndpoint {
+                base = endpoint
+            }
+        }
+        guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            return base
+        }
+        var items = components.queryItems ?? []
+        let hint: String?
+        if let idTokenHint, !idTokenHint.isEmpty {
+            hint = idTokenHint
+        } else {
+            hint = (try? await tokenStore.load())?.idToken
+        }
+        if let hint, !hint.isEmpty {
+            items.append(URLQueryItem(name: "id_token_hint", value: hint))
+        }
+        items.append(URLQueryItem(name: "client_id", value: configuration.clientID))
+        if let postLogoutRedirectURI {
+            items.append(URLQueryItem(name: "post_logout_redirect_uri", value: postLogoutRedirectURI.absoluteString))
+        }
+        if let state, !state.isEmpty {
+            items.append(URLQueryItem(name: "state", value: state))
+        }
+        components.queryItems = items.isEmpty ? nil : items
+        return components.url ?? base
+    }
+
+    private func fallbackEndSessionURL() -> URL {
+        var issuer = configuration.issuerURL.absoluteString
+        if issuer.hasSuffix("/") { issuer.removeLast() }
+        return URL(string: issuer + "/oauth/logout") ?? configuration.issuerURL
     }
 
     public func storedTokens() async throws -> Last1IDTokens? {

@@ -13,6 +13,94 @@ final class ClientFlowTests: XCTestCase {
         }
     }
 
+    func testEndSessionEndpointIsOptionalAndMustStayOnIssuer() throws {
+        var missing = try XCTUnwrap(JSONSerialization.jsonObject(with: discoveryDocument(issuer: "https://auth.last1.id")) as? [String: Any])
+        missing.removeValue(forKey: "end_session_endpoint")
+        let parsed = try Last1IDDiscovery.parse(data: jsonData(missing), expectedIssuer: "https://auth.last1.id")
+        XCTAssertNil(parsed.endSessionEndpoint)
+
+        var offOrigin = missing
+        offOrigin["end_session_endpoint"] = "https://evil.example/oauth/logout"
+        XCTAssertThrowsError(try Last1IDDiscovery.parse(data: jsonData(offOrigin), expectedIssuer: "https://auth.last1.id")) { error in
+            guard case Last1IDError.discovery = error else {
+                XCTFail("unexpected \(error)")
+                return
+            }
+        }
+    }
+
+    func testBeginAuthorizationUsesCallerStateNonceAndPKCE() async throws {
+        let app = TestApp()
+        MockURLProtocol.register(host: app.host) { request in
+            if request.url.path.contains("openid-configuration") {
+                return MockResponse(body: discoveryDocument(issuer: app.issuer.absoluteString))
+            }
+            return MockResponse(status: 404)
+        }
+        defer { MockURLProtocol.unregister(host: app.host) }
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        let pair = try Last1IDPKCE(codeVerifier: verifier)
+        let attempt = try await app.client().beginAuthorization(
+            state: "state-from-app",
+            nonce: "nonce-from-app",
+            pkce: pair
+        )
+        XCTAssertEqual(attempt.state, "state-from-app")
+        XCTAssertEqual(attempt.nonce, "nonce-from-app")
+        XCTAssertEqual(attempt.codeVerifier, verifier)
+        XCTAssertEqual(attempt.codeChallenge, pair.codeChallenge)
+        let items = URLComponents(url: attempt.url, resolvingAgainstBaseURL: false)?.queryItems
+        XCTAssertEqual(items?.first { $0.name == "state" }?.value, "state-from-app")
+        XCTAssertEqual(items?.first { $0.name == "nonce" }?.value, "nonce-from-app")
+        XCTAssertEqual(items?.first { $0.name == "code_challenge" }?.value, pair.codeChallenge)
+        XCTAssertEqual(items?.first { $0.name == "code_challenge_method" }?.value, "S256")
+
+        let fromVerifier = try await app.client().beginAuthorization(codeVerifier: verifier)
+        XCTAssertEqual(fromVerifier.codeVerifier, verifier)
+        XCTAssertEqual(fromVerifier.codeChallenge, pair.codeChallenge)
+
+        let callback = URL(string: "myapp://callback?code=abc&state=state-from-app")!
+        let parsed = try Last1IDCallbackParser.parse(callback: callback, redirectURI: app.configuration.redirectURI)
+        XCTAssertEqual(parsed.state, attempt.state)
+        let code = try Last1IDCallbackParser.authorizationCode(
+            from: callback,
+            redirectURI: app.configuration.redirectURI,
+            expectedState: attempt.state
+        )
+        XCTAssertEqual(code, "abc")
+    }
+
+    func testBeginAuthorizationRejectsABadCallerPKCE() async throws {
+        let app = TestApp()
+        MockURLProtocol.register(host: app.host) { request in
+            if request.url.path.contains("openid-configuration") {
+                return MockResponse(body: discoveryDocument(issuer: app.issuer.absoluteString))
+            }
+            return MockResponse(status: 404)
+        }
+        defer { MockURLProtocol.unregister(host: app.host) }
+        do {
+            _ = try await app.client().beginAuthorization(codeVerifier: "too-short")
+            XCTFail("expected a short verifier to fail")
+        } catch let error as Last1IDError {
+            guard case .configuration = error else {
+                XCTFail("unexpected \(error)")
+                return
+            }
+        }
+        let pair = try Last1IDPKCE(codeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+        let other = String(repeating: "a", count: 43)
+        do {
+            _ = try await app.client().beginAuthorization(codeVerifier: other, pkce: pair)
+            XCTFail("expected a verifier mismatch to fail")
+        } catch let error as Last1IDError {
+            guard case .configuration = error else {
+                XCTFail("unexpected \(error)")
+                return
+            }
+        }
+    }
+
     func testDiscoveryIsCachedAndIssuerMustMatch() async throws {
         let app = TestApp()
         var hits = 0
@@ -77,6 +165,7 @@ final class ClientFlowTests: XCTestCase {
         XCTAssertEqual(tokenBody["code"], "auth-code")
         XCTAssertEqual(tokenBody["code_verifier"], "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
         XCTAssertNil(tokenBody["client_secret"])
+        XCTAssertEqual(session.idToken, idToken)
         let stored = try await app.store.load()
         XCTAssertEqual(stored?.accessToken, "access-new")
         XCTAssertEqual(stored?.refreshToken, "refresh-new")
@@ -149,7 +238,9 @@ final class ClientFlowTests: XCTestCase {
         XCTAssertEqual(profile.sub, "person-1")
         XCTAssertEqual(profile.emailVerified, true)
         XCTAssertEqual(profile.last1Verified, true)
-        try await app.client().signOut()
+        let endSession = try await app.client().signOut()
+        XCTAssertTrue(endSession.absoluteString.contains("/oauth/logout"))
+        XCTAssertTrue(endSession.absoluteString.contains("client_id=example-app"))
         XCTAssertTrue(revoked)
         XCTAssertEqual(revokeBody["token"], "refresh-1")
         XCTAssertEqual(revokeBody["token_type_hint"], "refresh_token")
